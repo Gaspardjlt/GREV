@@ -1,0 +1,83 @@
+import numpy as np
+from sklearn.feature_selection import f_classif
+from tqdm import tqdm
+import matplotlib.pyplot as plt
+
+# === Chargement du .npz ===
+data = np.load("GREV/inf-8245-fall-2025/train.npz")
+data_test = np.load("GREV/inf-8245-fall-2025/test.npz")
+X_train = data['X_train']
+X_test = data_test['X_test']
+y_train = data['y_train']
+ids = data['ids']
+
+chunk_size = 10000
+n_features = X_train.shape[1]
+
+f_scores = np.zeros(n_features)
+p_values = np.ones(n_features)
+
+print(f"Calcul des scores F (ANOVA) sur {n_features} features en paquets de {chunk_size}...")
+
+# === Boucle sur les features par blocs ===
+for i in tqdm(range(0, n_features, chunk_size)):
+    chunk = X_train[:, i:i + chunk_size]
+
+    # Conversion en float32 (gain mémoire)
+    chunk = chunk.astype(np.float32)
+
+    # Calcul du F-score pour ce bloc
+    scores, pvals = f_classif(chunk, y_train)
+
+    # On stocke les résultats dans les bons emplacements
+    f_scores[i:i + chunk.shape[1]] = scores
+    p_values[i:i + chunk.shape[1]] = pvals
+
+# === Sélection des meilleures features ===
+k = 100000  # nombre de features à garder
+sorted_indices = np.argsort(-f_scores)  # tri décroissant
+top_indices = sorted_indices[:k]
+
+print(f"\nSélection des {k:,} features les plus discriminantes...")
+
+# === Réduction du jeu de données ===
+X_train_reduced = X_train[:, top_indices]
+X_test_reduced = X_test[:, top_indices]
+
+import pandas as pd
+from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import StandardScaler
+from sklearn.ensemble import RandomForestClassifier
+
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train_reduced)
+X_test_scaled = scaler.transform(X_test_reduced)
+
+rf = RandomForestClassifier(
+    n_estimators=200,         # 100–300 est suffisant, plus ralentit fortement
+    max_depth=20,             # limite la complexité des arbres
+    max_features='sqrt',      # sous-échantillonne les features (≈316 sur 100k)
+    min_samples_split=5,      # évite les divisions trop fines
+    min_samples_leaf=2,       # stabilise les feuilles
+    bootstrap=True,           # standard pour la robustesse
+    n_jobs=-1,                # utilise tous les cœurs
+    random_state=42,          # reproductibilité
+    verbose=0                 # désactive la sortie texte
+)
+
+model = rf
+model.fit(X_train_scaled, y_train)
+
+y_pred = model.predict(X_test_scaled)
+
+# ID | Label  
+submission = pd.DataFrame({
+    "id": data_test['ids'],   
+    "label": y_pred.astype(int) 
+})
+
+submission.to_csv("submission_9_11_1.csv", index=False)
+
+print("✅ Fichier 'submission.csv' prêt à être soumis sur Kaggle !")
+
+data.close()
