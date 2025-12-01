@@ -1,0 +1,301 @@
+# import numpy as np
+# import pandas as pd
+# from tqdm import tqdm
+# from sklearn.feature_selection import VarianceThreshold
+# from sklearn.preprocessing import StandardScaler
+# from xgboost import XGBClassifier
+# from xgboost.callback import TrainingCallback
+# import warnings
+# import os
+
+# warnings.filterwarnings("ignore")
+
+# # ======================================================================
+# # 0. CHARGEMENT DES DONNÉES
+# # ======================================================================
+
+# data = np.load("GREV/inf-8245-fall-2025/train.npz")
+# data_test = np.load("GREV/inf-8245-fall-2025/test.npz")
+# X_train = data['X_train']
+# X_test = data_test['X_test']
+# y_train = data['y_train']
+# ids_test = data_test['ids']
+
+# n_samples = y_train.shape[0]
+# n_features = X_train.shape[1]
+
+# final_k = 1000
+# CHUNK_SIZE = 100000
+
+# print(f"Dimensions cibles : ({n_samples}, {n_features:,})")
+# print("-" * 50)
+
+# # ======================================================================
+# # 1. FILTRAGE PAR VARIANCE
+# # ======================================================================
+
+# print("1. Filtrage par Variance sur les features par blocs...")
+
+# selector = VarianceThreshold(threshold=0.01)
+# selected_feature_indices = []
+
+# for i in tqdm(range(0, n_features, CHUNK_SIZE), desc="Filtrage par Variance"):
+#     chunk_start = i
+#     chunk_end = min(i + CHUNK_SIZE, n_features)
+
+#     current_chunk = X_train[:, chunk_start:chunk_end]
+
+#     selector.fit(current_chunk)
+#     local_indices = selector.get_support(indices=True)
+#     global_indices = [idx + chunk_start for idx in local_indices]
+#     selected_feature_indices.extend(global_indices)
+
+#     del current_chunk
+
+# print(f"Features conservées : {len(selected_feature_indices):,}")
+# print("-" * 50)
+
+# # ======================================================================
+# # 2. REDUCTION DU JEU DE DONNÉES
+# # ======================================================================
+
+# print("2. Construction du jeu réduit...")
+
+# X_train_reduced = X_train[:, selected_feature_indices]
+# X_test_reduced = X_test[:, selected_feature_indices]
+
+# print(f"Dimensions réduites : {X_train_reduced.shape}")
+
+# data.close()
+# data_test.close()
+
+# # ======================================================================
+# # 3. SELECTION DIRECTE DES 1000 FEATURES
+# # ======================================================================
+
+# print("3. Sélection directe des 1000 features les plus variables...")
+
+# variances = np.var(X_train_reduced, axis=0)
+# top_indices_final = np.argsort(variances)[::-1][:final_k]
+
+# X_train_final = X_train_reduced[:, top_indices_final]
+# X_test_final = X_test_reduced[:, top_indices_final]
+
+# print(f"Dimensions finales : {X_train_final.shape}")
+# print("-" * 50)
+
+# # ======================================================================
+# # 4. STANDARDISATION
+# # ======================================================================
+
+# print("4. Standardisation...")
+
+# scaler = StandardScaler()
+# X_train_final = scaler.fit_transform(X_train_final)
+# X_test_final = scaler.transform(X_test_final)
+
+# # ======================================================================
+# # 5. XGBOOST AVEC BARRE DE PROGRESSION
+# # ======================================================================
+
+# class TQDMCallback(TrainingCallback):
+#     def __init__(self, total_rounds):
+#         self.total_rounds = total_rounds
+#         self.pbar = tqdm(total=total_rounds, desc="XGBoost Training")
+
+#     def after_iteration(self, model, epoch, evals_log):
+#         self.pbar.update(1)
+#         if epoch + 1 == self.total_rounds:
+#             self.pbar.close()
+#         return False
+
+# print("5. Entraînement XGBoost...")
+
+# num_rounds = 300
+
+# xgb = XGBClassifier(
+#     n_estimators=num_rounds,
+#     max_depth=6,
+#     learning_rate=0.1,
+#     subsample=0.8,
+#     colsample_bytree=0.1,
+#     min_child_weight=3,
+#     gamma=0.1,
+#     reg_lambda=1.0,
+#     reg_alpha=1.0,
+#     tree_method='hist',
+#     n_jobs=-1,
+#     random_state=42,
+#     verbosity=1
+# )
+
+# xgb.fit(
+#     X_train_final,
+#     y_train,
+# )
+
+# print("Modèle XGBoost entraîné.")
+# print("-" * 50)
+
+# # ======================================================================
+# # 6. SUBMISSION
+# # ======================================================================
+
+# y_pred = xgb.predict(X_test_final)
+
+# submission = pd.DataFrame({
+#     "id": ids_test,
+#     "label": y_pred.astype(int)
+# })
+
+# submission_filename = "submission_final_grev_xgb_1000.csv"
+# submission.to_csv(submission_filename, index=False)
+
+# print(f"Fichier de soumission créé : {submission_filename}")
+
+import numpy as np
+import pandas as pd
+from tqdm import tqdm
+from sklearn.feature_selection import VarianceThreshold
+from sklearn.preprocessing import StandardScaler
+from xgboost import XGBClassifier
+import warnings
+import os
+
+warnings.filterwarnings("ignore")
+
+# ======================================================================
+# 0. CHARGEMENT DES DONNÉES
+# ======================================================================
+
+data = np.load("GREV/inf-8245-fall-2025/train.npz")
+data_test = np.load("GREV/inf-8245-fall-2025/test.npz")
+X_train = data['X_train']
+X_test = data_test['X_test']
+y_train = data['y_train']
+ids_test = data_test['ids']
+
+n_samples = y_train.shape[0]
+n_features = X_train.shape[1]
+
+final_k = 4000
+CHUNK_SIZE = 100000
+
+print(f"Dimensions cibles : ({n_samples}, {n_features:,})")
+print("-" * 50)
+
+# ======================================================================
+# 1. FILTRAGE PAR VARIANCE
+# ======================================================================
+
+print("1. Filtrage par Variance sur les features par blocs...")
+
+selector = VarianceThreshold(threshold=0.01)
+selected_feature_indices = []
+
+for i in tqdm(range(0, n_features, CHUNK_SIZE), desc="Filtrage par Variance"):
+    chunk_start = i
+    chunk_end = min(i + CHUNK_SIZE, n_features)
+
+    current_chunk = X_train[:, chunk_start:chunk_end]
+
+    selector.fit(current_chunk)
+    local_indices = selector.get_support(indices=True)
+    global_indices = [idx + chunk_start for idx in local_indices]
+    selected_feature_indices.extend(global_indices)
+
+    del current_chunk
+
+print(f"Features conservées : {len(selected_feature_indices):,}")
+print("-" * 50)
+
+# ======================================================================
+# 2. REDUCTION DU JEU DE DONNÉES
+# ======================================================================
+
+print("2. Construction du jeu réduit...")
+
+X_train_reduced = X_train[:, selected_feature_indices]
+X_test_reduced = X_test[:, selected_feature_indices]
+
+print(f"Dimensions réduites : {X_train_reduced.shape}")
+
+data.close()
+data_test.close()
+
+# ======================================================================
+# 3. SELECTION DIRECTE DES 4000 FEATURES
+# ======================================================================
+
+print("3. Sélection directe des 4000 features les plus variables...")
+
+variances = np.var(X_train_reduced, axis=0)
+top_indices_final = np.argsort(variances)[::-1][:final_k]
+
+X_train_final = X_train_reduced[:, top_indices_final]
+X_test_final = X_test_reduced[:, top_indices_final]
+
+print(f"Dimensions finales : {X_train_final.shape}")
+print("-" * 50)
+
+# ======================================================================
+# 4. STANDARDISATION
+# ======================================================================
+
+print("4. Standardisation...")
+
+scaler = StandardScaler()
+X_train_final = scaler.fit_transform(X_train_final)
+X_test_final = scaler.transform(X_test_final)
+
+# ======================================================================
+# 5. XGBOOST AVEC PONDÉRATION DES CLASSES
+# ======================================================================
+
+print("5. Entraînement XGBoost avec gestion du déséquilibre...")
+
+# Calcul du scale_pos_weight
+pos = np.sum(y_train == 1)
+neg = np.sum(y_train == 0)
+scale_pos_weight = neg / pos
+
+xgb = XGBClassifier(
+    n_estimators=500,
+    max_depth=6,
+    learning_rate=0.05,
+    subsample=0.8,
+    colsample_bytree=0.1,
+    min_child_weight=3,
+    gamma=0.1,
+    reg_lambda=1.0,
+    reg_alpha=1.0,
+    tree_method='hist',
+    n_jobs=-1,
+    random_state=42,
+    verbosity=1,
+    scale_pos_weight=scale_pos_weight      # Gestion déséquilibre
+)
+
+xgb.fit(
+    X_train_final,
+    y_train,
+)
+
+print("Modèle XGBoost entraîné.")
+print("-" * 50)
+
+# ======================================================================
+# 6. SUBMISSION
+# ======================================================================
+
+y_pred = xgb.predict(X_test_final)
+
+submission = pd.DataFrame({
+    "id": ids_test,
+    "label": y_pred.astype(int)
+})
+
+submission_filename = "submission__.csv"
+submission.to_csv(submission_filename, index=False)
+
+print(f"Fichier de soumission créé : {submission_filename}")

@@ -1,0 +1,99 @@
+# ======================================================================
+# 1. Essai 1
+# ======================================================================
+score obtenu : 0.810639336261591
+Voici les hyperparamètres exacts retenus pour cette configuration optimale :
+1. Structure du Modèle et Données
+Nombre de features conservées (n_features) : 4 940
+Profondeur maximale des arbres (max_depth) : 3
+Poids minimum par feuille (min_child_weight) : 1
+Nombre d'arbres (n_estimators) : 517
+2. Apprentissage et Échantillonnage
+Taux d'apprentissage (learning_rate) : ~0.038
+Échantillonnage des lignes (subsample) : ~0.502 (Il ne prend que la moitié des données par arbre)
+Échantillonnage des colonnes (colsample_bytree) : ~0.510 (Il ne prend que la moitié des features par arbre)
+3. Régularisation
+Gamma : ~1.59e-08 (Quasi nul)
+Reg Alpha (L1) : ~9.97e-05
+Reg Lambda (L2) : ~0.0035
+
+# ======================================================================
+# 2. Essai 2
+# ======================================================================
+Meilleur F1 validé : 0.8229
+Meilleurs paramètres trouvés :
+  n_features: 5669
+  n_estimators: 500
+  max_depth: 6
+  learning_rate: 0.06219779428305049
+  subsample: 0.5047136535694254
+  colsample_bytree: 0.5409425756533363
+  min_child_weight: 2
+  gamma: 0.0017849295709876072
+  reg_alpha: 0.0011003053868108527
+  reg_lambda: 0.9420641447529922
+
+# ======================================================================
+# 3. Essai 3
+# ======================================================================
+Meilleur F1 validé : 0.8106
+Meilleurs paramètres trouvés :
+  n_features: 5656
+  n_estimators: 785
+  max_depth: 8
+  reg_lambda: 0.04188218007640044
+  learning_rate: 0.053090379504632815
+  subsample: 0.5002151182599988
+  colsample_bytree: 0.6867337801466474
+  min_child_weight: 3
+  gamma: 1.6629025778501785e-07
+  reg_alpha: 5.2677500223394496e-05
+
+# ======================================================================
+# 4. Essai 4
+# ======================================================================
+Meilleur F1 validé : 0.8351
+Meilleurs paramètres trouvés :
+  n_features: 5976
+  n_estimators: 660
+  max_depth: 7
+  learning_rate: 0.09172605170477288
+  subsample: 0.5454374868013554
+  colsample_bytree: 0.589596351527845
+  min_child_weight: 1
+  reg_lambda: 1.7487520593963648
+  reg_alpha: 0.021089135742992402
+  gamma: 0.04814724199833151
+
+# ======================================================================
+# 5. Essai 5
+# ======================================================================
+Meilleur Macro F1 trouvé (CV): 0.8294
+Meilleurs paramètres :
+  n_features: 5154
+  n_estimators: 620
+  max_depth: 9
+  learning_rate: 0.05324913205968765
+  subsample: 0.8652839810884891
+  colsample_bytree: 0.40162797322493987
+  min_child_weight: 2
+  reg_lambda: 2.1728794435530827
+  reg_alpha: 0.4866254008260326
+  gamma: 0.10748268786731201
+  use_metadata: False
+
+# ======================================================================
+# 6. Essai 6
+# ======================================================================
+Nouveau Meilleur Macro F1 (CV): 0.8318
+Paramètres optimaux :
+  n_features: 5709
+  max_depth: 7
+  learning_rate: 0.01464868569422652
+  n_estimators: 838
+  subsample: 0.7019649061913842
+  colsample_bytree: 0.558066315880479
+  min_child_weight: 2
+  reg_lambda: 1.5611573538818977
+  reg_alpha: 0.6492972087792834
+  gamma: 0.0028738442812359377

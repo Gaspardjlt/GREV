@@ -1,0 +1,361 @@
+# import numpy as np
+# import pandas as pd
+# import xgboost as xgb
+# from sklearn.preprocessing import StandardScaler
+# import gc
+# import warnings
+
+# warnings.filterwarnings("ignore")
+
+# # ======================================================================
+# # CONFIGURATION
+# # ======================================================================
+# PATH_TRAIN_NPZ = '/Users/gaspardjuillet/Library/Mobile Documents/com~apple~CloudDocs/Poly_Cours/Machine_Learning/Kaggle_competition/GREV/inf-8245-fall-2025/train.npz'
+# PATH_TEST_NPZ = '/Users/gaspardjuillet/Library/Mobile Documents/com~apple~CloudDocs/Poly_Cours/Machine_Learning/Kaggle_competition/GREV/inf-8245-fall-2025/test.npz'
+# CHUNK_SIZE = 100000
+
+# # Paramètres exacts de l'essai 7
+# BEST_PARAMS = {
+#     'max_depth': 7,
+#     'learning_rate': 0.020560876203436,
+#     'n_estimators': 1498,
+#     'subsample': 0.741124834589114,
+#     'reg_lambda': 9.648578510999439,
+#     'reg_alpha': 1.2494287342009636,
+#     'gamma': 0.7339260632861198,
+#     'min_child_weight': 3,
+#     'colsample_bytree': 0.5712621238375263,
+#     'tree_method': 'hist',
+#     'n_jobs': -1,
+#     'random_state': 42,
+#     'verbosity': 1
+# }
+
+# N_FEATURES_TARGET = 4586  # Issu de l'essai 7
+# INITIAL_POOL_SIZE = 9000  # Comme dans le script d'optimisation
+
+# # ======================================================================
+# # 1. CHARGEMENT ET SÉLECTION DES FEATURES
+# # ======================================================================
+
+# print("Chargement des données...")
+# data_train = np.load(PATH_TRAIN_NPZ)
+# data_test_npz = np.load(PATH_TEST_NPZ)
+
+# X_train_raw = data_train['X_train']
+# y_train = data_train['y_train']
+# ids_test = data_test_npz['ids']
+# X_test_raw = data_test_npz['X_test']
+
+# n_total_features = X_train_raw.shape[1]
+
+# print(f"1. Filtrage initial (Top {INITIAL_POOL_SIZE} par variance)...")
+
+# # Calcul de la variance globale
+# variances = []
+# for i in range(0, n_total_features, CHUNK_SIZE):
+#     chunk = X_train_raw[:, i:min(i + CHUNK_SIZE, n_total_features)]
+#     variances.extend(np.var(chunk, axis=0))
+#     del chunk
+#     gc.collect()
+
+# variances = np.array(variances)
+# # Indices du pool initial (Top 9000)
+# top_pool_indices = np.argsort(variances)[::-1][:INITIAL_POOL_SIZE]
+# top_pool_indices.sort() # Tri pour extraction efficace
+
+# # Extraction du pool
+# X_train_pool = X_train_raw[:, top_pool_indices]
+# X_test_pool = X_test_raw[:, top_pool_indices]
+
+# del X_train_raw, X_test_raw, variances
+# gc.collect()
+
+# print(f"2. Sélection fine (Top {N_FEATURES_TARGET} de l'essai 7)...")
+
+# # Calcul variance sur le pool réduit
+# pool_variances = np.var(X_train_pool, axis=0)
+# # Tri décroissant au sein du pool
+# sorted_pool_indices = np.argsort(pool_variances)[::-1]
+# # Sélection finale
+# final_indices = sorted_pool_indices[:N_FEATURES_TARGET]
+
+# X_train_final = X_train_pool[:, final_indices]
+# X_test_final = X_test_pool[:, final_indices]
+
+# print(f"Dimensions finales train : {X_train_final.shape}")
+
+# # ======================================================================
+# # 2. STANDARDISATION
+# # ======================================================================
+
+# print("Standardisation...")
+# scaler = StandardScaler()
+# X_train_final = scaler.fit_transform(X_train_final)
+# X_test_final = scaler.transform(X_test_final)
+
+# # ======================================================================
+# # 3. ENTRAÎNEMENT
+# # ======================================================================
+
+# print("Entraînement du modèle ROBUSTE (Trial 7)...")
+
+# # Calcul scale_pos_weight
+# pos = np.sum(y_train == 1)
+# neg = np.sum(y_train == 0)
+# scale_pos_weight = neg / pos
+# BEST_PARAMS['scale_pos_weight'] = scale_pos_weight
+
+# model = xgb.XGBClassifier(**BEST_PARAMS)
+# model.fit(X_train_final, y_train)
+
+# print("Modèle entraîné.")
+
+# # ======================================================================
+# # 4. PRÉDICTION ET SOUMISSION
+# # ======================================================================
+
+# print("Génération des prédictions...")
+# y_pred = model.predict(X_test_final)
+
+# submission = pd.DataFrame({
+#     "id": ids_test,
+#     "label": y_pred.astype(int)
+# })
+
+# filename = "submission_trial_7_robust.csv"
+# submission.to_csv(filename, index=False)
+# print(f"Fichier prêt : {filename}")
+
+# # Nettoyage
+# data_train.close()
+# data_test_npz.close()
+
+import numpy as np
+import pandas as pd
+import xgboost as xgb
+import optuna
+from sklearn.feature_selection import VarianceThreshold
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.model_selection import StratifiedKFold, cross_val_score
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.impute import SimpleImputer
+import gc
+import warnings
+
+warnings.filterwarnings("ignore")
+
+# ======================================================================
+# CONFIGURATION
+# ======================================================================
+PATH_TRAIN_NPZ = '/Users/gaspardjuillet/Library/Mobile Documents/com~apple~CloudDocs/Poly_Cours/Machine_Learning/Kaggle_competition/GREV/inf-8245-fall-2025/train.npz'
+PATH_TEST_NPZ = '/Users/gaspardjuillet/Library/Mobile Documents/com~apple~CloudDocs/Poly_Cours/Machine_Learning/Kaggle_competition/GREV/inf-8245-fall-2025/test.npz'
+PATH_META_TRAIN = '/Users/gaspardjuillet/Library/Mobile Documents/com~apple~CloudDocs/Poly_Cours/Machine_Learning/Kaggle_competition/GREV/inf-8245-fall-2025/metadata_train.csv'
+PATH_META_TEST = '/Users/gaspardjuillet/Library/Mobile Documents/com~apple~CloudDocs/Poly_Cours/Machine_Learning/Kaggle_competition/GREV/inf-8245-fall-2025/metadata_test.csv'
+
+N_TRIALS = 40  # Assez pour trouver l'équilibre
+CHUNK_SIZE = 100000
+
+# ======================================================================
+# 1. NETTOYAGE MÉTADONNÉES (STRICTEMENT SELON LE PDF)
+# ======================================================================
+
+def process_metadata(df):
+    df = df.copy()
+    
+    # 1. Standardisation des noms (snake_case)
+    df.columns = [c.lower().replace(' ', '_') for c in df.columns]
+    
+    # 2. Suppression basée sur le PDF (colinéarité et constantes)
+    # [cite: 200, 202, 206]
+    cols_to_drop = [
+        'organism_group',              # Constante
+        'laboratory_typing_platform',  # Colinéaire Location
+        'testing_standard',            # Colinéaire Location
+        'isolation_type',              # Colinéaire Isolation source
+        'unnamed:_0'
+    ]
+    df = df.drop(columns=[c for c in cols_to_drop if c in df.columns], errors='ignore')
+
+    # 3. Traitement Date (Creation Year)
+    # [cite: 203] "On garde l'année de création qui donne des infos en plus"
+    if 'create_date' in df.columns:
+        df['create_date'] = pd.to_numeric(df['create_date'], errors='coerce')
+        df['create_date'] = df['create_date'].fillna(df['create_date'].median())
+    
+    return df
+
+def get_meta_pipeline(cat_cols, num_cols):
+    cat_transformer = Pipeline(steps=[
+        ('imputer', SimpleImputer(strategy='most_frequent')), # [cite: 312]
+        ('onehot', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
+    ])
+    num_transformer = Pipeline(steps=[('scaler', StandardScaler())])
+
+    return ColumnTransformer(
+        transformers=[
+            ('num', num_transformer, num_cols),
+            ('cat', cat_transformer, cat_cols)
+        ], remainder='drop'
+    )
+
+# ======================================================================
+# 2. CHARGEMENT ET PRÉPARATION
+# ======================================================================
+
+print("Chargement Genomique...")
+data_train = np.load(PATH_TRAIN_NPZ)
+data_test_npz = np.load(PATH_TEST_NPZ)
+
+X_train_raw = data_train['X_train']
+y_train = data_train['y_train']
+ids_train = data_train['ids']
+
+X_test_raw = data_test_npz['X_test']
+ids_test = data_test_npz['ids']
+
+# --- Filtrage Variance (Pool 9000) ---
+print("Filtrage Variance...")
+n_features = X_train_raw.shape[1]
+variances = []
+for i in range(0, n_features, CHUNK_SIZE):
+    chunk = X_train_raw[:, i:min(i + CHUNK_SIZE, n_features)]
+    variances.extend(np.var(chunk, axis=0))
+    del chunk
+    gc.collect()
+
+variances = np.array(variances)
+pool_indices = np.argsort(variances)[::-1][:9000]
+pool_indices.sort()
+
+X_train_genomic = X_train_raw[:, pool_indices]
+X_test_genomic = X_test_raw[:, pool_indices]
+
+# Variance locale pour sélection rapide dans Optuna
+local_variances = np.var(X_train_genomic, axis=0)
+sorted_local_idx = np.argsort(local_variances)[::-1]
+
+del X_train_raw, X_test_raw, variances
+gc.collect()
+
+# --- Chargement Métadonnées ---
+print("Intégration Métadonnées...")
+df_meta_train = pd.read_csv(PATH_META_TRAIN)
+df_meta_test = pd.read_csv(PATH_META_TEST)
+
+# Alignement ID
+df_meta_train = df_meta_train.set_index('ID').reindex(ids_train).reset_index()
+df_meta_test = df_meta_test.set_index('ID').reindex(ids_test).reset_index()
+
+# Process
+df_meta_train = process_metadata(df_meta_train)
+df_meta_test = process_metadata(df_meta_test)
+
+# Pipeline
+cat_cols = ['location', 'isolation_source'] # 
+num_cols = ['create_date']
+
+meta_prep = get_meta_pipeline(cat_cols, num_cols)
+X_meta_train = meta_prep.fit_transform(df_meta_train)
+X_meta_test = meta_prep.transform(df_meta_test)
+
+print(f"Métadonnées prêtes: {X_meta_train.shape[1]} features ajoutées.")
+
+# ======================================================================
+# 3. OPTIMISATION HYBRIDE
+# ======================================================================
+
+print("\nDébut Optuna (Hybride)...")
+
+def objective(trial):
+    # --- Features Génomiques ---
+    # On revient sur une plage plus large (5000-7500)
+    n_feat = trial.suggest_int('n_features', 5000, 7500)
+    
+    idx = sorted_local_idx[:n_feat]
+    X_g = X_train_genomic[:, idx]
+    scaler = StandardScaler()
+    X_g = scaler.fit_transform(X_g)
+    
+    # FUSION Génomique + Métadonnées
+    # On force l'utilisation des métadonnées cette fois
+    X_trial = np.hstack((X_g, X_meta_train))
+    
+    # --- Hyperparamètres ---
+    # On relâche un peu la bride par rapport au Trial 7
+    params = {
+        'max_depth': trial.suggest_int('max_depth', 6, 10), # [6-10] au lieu de [4-7]
+        'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.06, log=True),
+        'n_estimators': trial.suggest_int('n_estimators', 800, 1500),
+        'subsample': trial.suggest_float('subsample', 0.6, 0.9),
+        'colsample_bytree': trial.suggest_float('colsample_bytree', 0.3, 0.7),
+        
+        # Régularisation modérée (ni trop faible, ni trop forte comme 9.6)
+        'reg_lambda': trial.suggest_float('reg_lambda', 1.0, 6.0),
+        'reg_alpha': trial.suggest_float('reg_alpha', 0.1, 3.0),
+        
+        'min_child_weight': trial.suggest_int('min_child_weight', 2, 6),
+        'gamma': trial.suggest_float('gamma', 0.1, 0.6),
+        
+        'tree_method': 'hist',
+        'n_jobs': -1,
+        'random_state': 42,
+        'verbosity': 0
+    }
+    
+    # Poids
+    pos = np.sum(y_train == 1)
+    neg = np.sum(y_train == 0)
+    params['scale_pos_weight'] = neg / pos
+
+    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    clf = xgb.XGBClassifier(**params)
+    
+    scores = cross_val_score(clf, X_trial, y_train, cv=cv, scoring='f1_macro', n_jobs=-1)
+    return scores.mean()
+
+study = optuna.create_study(direction='maximize')
+study.optimize(objective, n_trials=N_TRIALS)
+
+print(f"Meilleur Score CV: {study.best_value:.4f}")
+
+# ======================================================================
+# 4. ENTRAINEMENT FINAL
+# ======================================================================
+
+best = study.best_params
+n_f = best.pop('n_features')
+
+# Préparation finale
+idx = sorted_local_idx[:n_f]
+X_g_train = X_train_genomic[:, idx]
+X_g_test = X_test_genomic[:, idx]
+
+sc = StandardScaler()
+X_g_train = sc.fit_transform(X_g_train)
+X_g_test = sc.transform(X_g_test)
+
+# Fusion finale
+X_train_final = np.hstack((X_g_train, X_meta_train))
+X_test_final = np.hstack((X_g_test, X_meta_test))
+
+# Poids
+pos = np.sum(y_train == 1)
+neg = np.sum(y_train == 0)
+best['scale_pos_weight'] = neg / pos
+
+print("Entrainement final...")
+model = xgb.XGBClassifier(**best)
+model.fit(X_train_final, y_train)
+
+y_pred = model.predict(X_test_final)
+
+sub = pd.DataFrame({"id": ids_test, "label": y_pred.astype(int)})
+fname = f"submission_hybrid_meta_f1_{study.best_value:.4f}.csv"
+sub.to_csv(fname, index=False)
+print(f"Saved: {fname}")
+
+# Nettoyage
+data_train.close()
+data_test_npz.close()

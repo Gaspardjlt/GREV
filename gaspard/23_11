@@ -1,0 +1,157 @@
+import numpy as np
+import pandas as pd
+from tqdm import tqdm
+from sklearn.feature_selection import VarianceThreshold
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import SGDClassifier
+from xgboost import XGBClassifier
+import warnings
+import os
+
+warnings.filterwarnings("ignore")
+
+# ======================================================================
+# 0. CHARGEMENT DES DONNÉES
+# ======================================================================
+
+data = np.load('/Users/gaspardjuillet/Library/Mobile Documents/com~apple~CloudDocs/Poly_Cours/Machine_Learning/Kaggle_competition/GREV/inf-8245-fall-2025/train.npz')
+data_test = np.load("/Users/gaspardjuillet/Library/Mobile Documents/com~apple~CloudDocs/Poly_Cours/Machine_Learning/Kaggle_competition/GREV/inf-8245-fall-2025/test.npz")
+X_train = data['X_train']
+X_test = data_test['X_test']
+y_train = data['y_train']
+ids_test = data_test['ids']
+
+n_samples = y_train.shape[0]
+n_features = data['X_train'].shape[1]
+
+final_k = 500       # <====== MODIFICATION ICI
+CHUNK_SIZE = 100000
+
+print(f"Dimensions cibles : ({n_samples}, {n_features:,})")
+print("-" * 50)
+
+# ======================================================================
+# 1. FILTRAGE PAR VARIANCE
+# ======================================================================
+
+print("1. Filtrage par Variance sur les features par blocs...")
+
+selector = VarianceThreshold(threshold=0.01)
+selected_feature_indices = []
+
+for i in tqdm(range(0, n_features, CHUNK_SIZE), desc="Filtrage par Variance"):
+    chunk_start = i
+    chunk_end = min(i + CHUNK_SIZE, n_features)
+
+    current_chunk = data['X_train'][:, chunk_start:chunk_end]
+
+    selector.fit(current_chunk)
+    local_indices = selector.get_support(indices=True)
+    global_indices = [idx + chunk_start for idx in local_indices]
+    selected_feature_indices.extend(global_indices)
+
+    del current_chunk
+
+print(f"Features conservées : {len(selected_feature_indices):,}")
+print("-" * 50)
+
+# ======================================================================
+# 2. RÉDUCTION + STANDARDISATION
+# ======================================================================
+
+print("2. Construction et Standardisation du jeu réduit...")
+
+X_train_reduced = data['X_train'][:, selected_feature_indices]
+X_test_reduced = data_test['X_test'][:, selected_feature_indices]
+
+print(f"Dimensions réduites : {X_train_reduced.shape}")
+
+data.close()
+data_test.close()
+
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train_reduced)
+X_test_scaled = scaler.transform(X_test_reduced)
+
+# ======================================================================
+# 3. ELASTIC NET FIXE
+# ======================================================================
+
+print("3. Entraînement Elastic Net (paramètres fixés)...")
+
+fixed_alpha = 1e-3
+fixed_l1_ratio = 0.9
+
+elastic_net_model = SGDClassifier(
+    loss='log_loss',
+    penalty='elasticnet',
+    alpha=fixed_alpha,
+    l1_ratio=fixed_l1_ratio,
+    random_state=42,
+    max_iter=3000,
+    tol=1e-3
+)
+
+elastic_net_model.fit(X_train_scaled, y_train)
+
+print("Paramètres Elastic Net utilisés :")
+print(f"  alpha     = {fixed_alpha}")
+print(f"  l1_ratio  = {fixed_l1_ratio}")
+print("-" * 50)
+
+# ======================================================================
+# 4. SÉLECTION FINALE DES 500 FEATURES
+# ======================================================================
+
+print(f"4. Sélection finale des {final_k} features...")
+
+coefs = np.abs(elastic_net_model.coef_[0])
+top_indices_final = np.argsort(coefs)[::-1][:final_k]
+
+X_train_final = X_train_scaled[:, top_indices_final]
+X_test_final = X_test_scaled[:, top_indices_final]
+
+print(f"Dimensions finales : {X_train_final.shape}")
+print("-" * 50)
+
+# ======================================================================
+# 5. XGBOOST
+# ======================================================================
+
+print("5. Entraînement XGBoost...")
+
+xgb = XGBClassifier(
+    n_estimators=300,
+    max_depth=6,
+    learning_rate=0.1,
+    subsample=0.8,
+    colsample_bytree=0.5,
+    min_child_weight=3,
+    reg_lambda=1.0,
+    tree_method='hist',
+    n_jobs=-1,
+    random_state=42,
+    verbosity=0
+)
+
+xgb.fit(X_train_final, y_train)
+
+print("Modèle XGBoost entraîné.")
+print("-" * 50)
+
+# ======================================================================
+# 6. PRÉDICT + SUBMISSION
+# ======================================================================
+
+y_pred = xgb.predict(X_test_final)
+
+submission = pd.DataFrame({
+    "id": ids_test,
+    "label": y_pred.astype(int)
+})
+
+submission_filename = "submission_final_grev_500_features.csv"
+submission.to_csv(submission_filename, index=False)
+
+print(f"Fichier de soumission créé : {submission_filename}")
+

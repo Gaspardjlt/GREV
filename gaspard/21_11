@@ -1,0 +1,69 @@
+import numpy as np
+from sklearn.feature_selection import f_classif
+from tqdm import tqdm
+import matplotlib.pyplot as plt
+
+data = np.load("GREV/inf-8245-fall-2025/train.npz")
+data_test = np.load("GREV/inf-8245-fall-2025/test.npz")
+X_train = data['X_train']
+X_test = data_test['X_test']
+y_train = data['y_train']
+ids = data['ids']
+
+chunk_size = 10000
+n_features = X_train.shape[1]
+
+f_scores = np.zeros(n_features)
+p_values = np.ones(n_features)
+
+for i in tqdm(range(0, n_features, chunk_size)):
+    chunk = X_train[:, i:i + chunk_size].astype(np.float32)
+    scores, pvals = f_classif(chunk, y_train)
+    f_scores[i:i + chunk.shape[1]] = scores
+    p_values[i:i + chunk.shape[1]] = pvals
+
+k = 100000
+sorted_indices = np.argsort(-f_scores)
+top_indices = sorted_indices[:k]
+
+X_train_reduced = X_train[:, top_indices]
+X_test_reduced = X_test[:, top_indices]
+
+from sklearn.preprocessing import StandardScaler
+scaler = StandardScaler()
+
+X_train_scaled = scaler.fit_transform(X_train_reduced.astype(np.float32))
+X_test_scaled = scaler.transform(X_test_reduced.astype(np.float32))
+
+import pandas as pd
+from xgboost import XGBClassifier
+
+xgb = XGBClassifier(
+    n_estimators=300,
+    max_depth=4,
+    learning_rate=0.03,
+    subsample=1.0,
+    colsample_bytree=0.8,
+    min_child_weight=3,
+    gamma=0.1,
+    reg_lambda=1.0,
+    tree_method='hist',
+    n_jobs=-1,
+    random_state=42,
+    verbosity=1
+)
+
+model = xgb
+model.fit(X_train_scaled, y_train)
+
+y_pred = model.predict(X_test_scaled)
+
+submission = pd.DataFrame({
+    "id": data_test['ids'],
+    "label": y_pred.astype(int)
+})
+
+submission.to_csv("submission_21_11.csv", index=False)
+
+data.close()
+data_test.close()

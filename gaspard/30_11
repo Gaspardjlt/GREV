@@ -1,0 +1,377 @@
+# import numpy as np
+# import pandas as pd
+# import xgboost as xgb
+# import optuna
+# from sklearn.feature_selection import VarianceThreshold
+# from sklearn.preprocessing import StandardScaler
+# from sklearn.model_selection import StratifiedKFold, cross_val_score
+# import gc
+# import warnings
+
+# warnings.filterwarnings("ignore")
+
+# # ======================================================================
+# # CONFIGURATION
+# # ======================================================================
+# PATH_TRAIN_NPZ = "GREV/inf-8245-fall-2025/train.npz"
+# PATH_TEST_NPZ = "GREV/inf-8245-fall-2025/test.npz"
+
+# # On augmente le nombre d'essais car l'espace de recherche est plus fin
+# N_TRIALS = 50  
+# CHUNK_SIZE = 100000
+
+# # ======================================================================
+# # 1. CHARGEMENT ET PRÉ-SÉLECTION
+# # ======================================================================
+
+# print("Chargement des données...")
+# data_train = np.load(PATH_TRAIN_NPZ)
+# data_test_npz = np.load(PATH_TEST_NPZ)
+
+# X_train_raw = data_train['X_train']
+# y_train = data_train['y_train']
+# ids_train = data_train['ids']
+
+# X_test_raw = data_test_npz['X_test']
+# ids_test = data_test_npz['ids']
+
+# n_features = X_train_raw.shape[1]
+
+# # On garde un pool initial un peu plus large que le max de la search space
+# # Pour être sûr d'avoir assez de marge pour l'optimisation
+# INITIAL_POOL_SIZE = 9000 
+# print(f"Filtrage par variance (Target Pool Top {INITIAL_POOL_SIZE})...")
+
+# variances = []
+# for i in range(0, n_features, CHUNK_SIZE):
+#     chunk = X_train_raw[:, i:min(i + CHUNK_SIZE, n_features)]
+#     var_chunk = np.var(chunk, axis=0)
+#     variances.extend(var_chunk)
+#     del chunk
+#     gc.collect()
+
+# variances = np.array(variances)
+# # Tri décroissant des variances
+# top_indices_global = np.argsort(variances)[::-1][:INITIAL_POOL_SIZE]
+# top_indices_global.sort() # Tri des indices pour extraction efficace
+
+# # Extraction des données réduites
+# X_train_genomic = X_train_raw[:, top_indices_global]
+# X_test_genomic = X_test_raw[:, top_indices_global]
+
+# print(f"Features génomiques conservées pour l'optimisation : {X_train_genomic.shape[1]}")
+
+# # Calcul des variances locales sur le pool réduit pour l'optimisation rapide dans Optuna
+# pool_variances = np.var(X_train_genomic, axis=0)
+# # Indices triés localement (du plus grand au plus petit dans le pool de 9000)
+# sorted_pool_indices = np.argsort(pool_variances)[::-1]
+
+# del X_train_raw, X_test_raw, variances
+# gc.collect()
+
+# # Note : On a décidé de ne pas charger les métadonnées car les résultats précédents
+# # ont montré que 'use_metadata=False' donnait systématiquement les meilleurs scores.
+
+# # ======================================================================
+# # 2. OPTIMISATION BAYÉSIENNE (OPTUNA) - SEARCH SPACE AFFINÉ
+# # ======================================================================
+
+# print("\nDébut de l'optimisation Bayésienne (Raffinée)...")
+
+# def objective(trial):
+#     # --- 1. SÉLECTION DE FEATURES ---
+#     # Précédent best: 5154. On resserre autour de cette valeur.
+#     n_feat = trial.suggest_int('n_features', 4000, 6500)
+    
+#     # Sélection des n_feat meilleures features du pool déjà chargé
+#     current_indices = sorted_pool_indices[:n_feat]
+#     X_trial = X_train_genomic[:, current_indices]
+    
+#     # Standardisation (Cruciale pour la convergence, même avec des arbres)
+#     scaler = StandardScaler()
+#     X_trial = scaler.fit_transform(X_trial)
+
+#     # --- 2. HYPERPARAMÈTRES XGBOOST ---
+#     # Stratégie : Arbres plus profonds, learning rate plus lent
+    
+#     params = {
+#         # Augmentation de la profondeur (Best was 9) -> Range 6-12
+#         'max_depth': trial.suggest_int('max_depth', 6, 12),
+        
+#         # Learning rate plus bas pour plus de précision (Best was 0.053)
+#         'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.08, log=True),
+        
+#         # On augmente les estimateurs pour compenser le LR bas
+#         'n_estimators': trial.suggest_int('n_estimators', 600, 1200),
+        
+#         # Subsample élevé semble marcher (Best was 0.86)
+#         'subsample': trial.suggest_float('subsample', 0.7, 0.95),
+        
+#         # Colsample : On garde bas car bcp de features (Best was 0.40)
+#         'colsample_bytree': trial.suggest_float('colsample_bytree', 0.3, 0.6),
+        
+#         # Min child weight : Bas (Best was 2)
+#         'min_child_weight': trial.suggest_int('min_child_weight', 1, 4),
+        
+#         # Regularization (Best Reg_lambda was 2.17)
+#         'reg_lambda': trial.suggest_float('reg_lambda', 1.0, 4.0),
+#         'reg_alpha': trial.suggest_float('reg_alpha', 0.1, 1.0),
+#         'gamma': trial.suggest_float('gamma', 0.0, 0.5),
+        
+#         'tree_method': 'hist',
+#         'n_jobs': -1,
+#         'random_state': 42,
+#         'verbosity': 0
+#     }
+
+#     # Gestion du déséquilibre de classe
+#     pos = np.sum(y_train == 1)
+#     neg = np.sum(y_train == 0)
+#     scale_pos_weight = neg / pos
+#     params['scale_pos_weight'] = scale_pos_weight
+
+#     # --- 3. CROSS-VALIDATION ---
+#     cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+#     clf = xgb.XGBClassifier(**params)
+    
+#     # Optimisation du F1 Macro
+#     scores = cross_val_score(clf, X_trial, y_train, cv=cv, scoring='f1_macro', n_jobs=-1)
+    
+#     return scores.mean()
+
+# # Création de l'étude
+# study = optuna.create_study(direction='maximize')
+# study.optimize(objective, n_trials=N_TRIALS)
+
+# print("-" * 50)
+# print(f"Nouveau Meilleur Macro F1 (CV): {study.best_value:.4f}")
+# print("Paramètres optimaux :")
+# for key, value in study.best_params.items():
+#     print(f"  {key}: {value}")
+# print("-" * 50)
+
+# # ======================================================================
+# # 3. ENTRAÎNEMENT FINAL
+# # ======================================================================
+
+# print("Entraînement du modèle final avec les meilleurs paramètres...")
+
+# best_params = study.best_params.copy()
+# n_feat_final = best_params.pop('n_features')
+
+# # Reconstruction du dataset final (Train + Test)
+# final_indices = sorted_pool_indices[:n_feat_final]
+
+# X_train_final = X_train_genomic[:, final_indices]
+# X_test_final = X_test_genomic[:, final_indices]
+
+# # Standardisation finale
+# scaler_final = StandardScaler()
+# X_train_final = scaler_final.fit_transform(X_train_final)
+# X_test_final = scaler_final.transform(X_test_final)
+
+# # Ajout scale_pos_weight manquant dans best_params
+# pos = np.sum(y_train == 1)
+# neg = np.sum(y_train == 0)
+# best_params['scale_pos_weight'] = neg / pos
+
+# model = xgb.XGBClassifier(**best_params)
+# model.fit(X_train_final, y_train)
+
+# print("Génération des prédictions...")
+# y_pred = model.predict(X_test_final)
+
+# submission = pd.DataFrame({
+#     "id": ids_test,
+#     "label": y_pred.astype(int)
+# })
+
+# filename = f"submission_optuna_refined_f1_{study.best_value:.4f}.csv"
+# submission.to_csv(filename, index=False)
+# print(f"Fichier de soumission prêt : {filename}")
+
+# # Nettoyage
+# data_train.close()
+# data_test_npz.close()
+
+import numpy as np
+import pandas as pd
+import xgboost as xgb
+import optuna
+from sklearn.feature_selection import VarianceThreshold
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import StratifiedKFold, cross_val_score
+import gc
+import warnings
+
+warnings.filterwarnings("ignore")
+
+# ======================================================================
+# CONFIGURATION
+# ======================================================================
+PATH_TRAIN_NPZ = "GREV/inf-8245-fall-2025/train.npz"
+PATH_TEST_NPZ = "GREV/inf-8245-fall-2025/test.npz"
+
+# On garde 50 essais pour bien explorer cet espace contraint
+N_TRIALS = 50  
+CHUNK_SIZE = 100000
+
+# ======================================================================
+# 1. CHARGEMENT ET PRÉ-SÉLECTION
+# ======================================================================
+
+print("Chargement des données...")
+data_train = np.load(PATH_TRAIN_NPZ)
+data_test_npz = np.load(PATH_TEST_NPZ)
+
+X_train_raw = data_train['X_train']
+y_train = data_train['y_train']
+ids_train = data_train['ids']
+
+X_test_raw = data_test_npz['X_test']
+ids_test = data_test_npz['ids']
+
+n_features = X_train_raw.shape[1]
+
+# On garde un pool initial de 9000 comme précédemment, ça fonctionnait bien
+INITIAL_POOL_SIZE = 9000 
+print(f"Filtrage par variance (Target Pool Top {INITIAL_POOL_SIZE})...")
+
+variances = []
+for i in range(0, n_features, CHUNK_SIZE):
+    chunk = X_train_raw[:, i:min(i + CHUNK_SIZE, n_features)]
+    var_chunk = np.var(chunk, axis=0)
+    variances.extend(var_chunk)
+    del chunk
+    gc.collect()
+
+variances = np.array(variances)
+top_indices_global = np.argsort(variances)[::-1][:INITIAL_POOL_SIZE]
+top_indices_global.sort() 
+
+X_train_genomic = X_train_raw[:, top_indices_global]
+X_test_genomic = X_test_raw[:, top_indices_global]
+
+print(f"Features génomiques conservées pour l'optimisation : {X_train_genomic.shape[1]}")
+
+pool_variances = np.var(X_train_genomic, axis=0)
+sorted_pool_indices = np.argsort(pool_variances)[::-1]
+
+del X_train_raw, X_test_raw, variances
+gc.collect()
+
+# ======================================================================
+# 2. OPTIMISATION "ROBUSTE" (ANTI-OVERFITTING)
+# ======================================================================
+
+print("\nDébut de l'optimisation Bayésienne (Mode Robustesse)...")
+
+def objective(trial):
+    # --- 1. SÉLECTION DE FEATURES ---
+    # Ton meilleur résultat était 5709. On reste dans cette zone "safe".
+    # Trop peu de features = underfitting, trop = overfitting.
+    n_feat = trial.suggest_int('n_features', 4500, 6000)
+    
+    current_indices = sorted_pool_indices[:n_feat]
+    X_trial = X_train_genomic[:, current_indices]
+    
+    scaler = StandardScaler()
+    X_trial = scaler.fit_transform(X_trial)
+
+    # --- 2. HYPERPARAMÈTRES "CONSTRICTIFS" ---
+    params = {
+        # CONSTRAINT 1: PROFONDEUR LIMITÉE
+        # On interdit les arbres > 7. On force le modèle à être synthétique.
+        'max_depth': trial.suggest_int('max_depth', 4, 7),
+        
+        # CONSTRAINT 2: APPRENTISSAGE LENT
+        # On force un apprentissage très lent pour compenser la faible profondeur
+        'learning_rate': trial.suggest_float('learning_rate', 0.005, 0.025, log=True),
+        'n_estimators': trial.suggest_int('n_estimators', 800, 1600),
+        
+        # CONSTRAINT 3: GÉNÉRALISATION (Subsample bas)
+        # On force le modèle à ne voir que 50% à 80% des données par arbre
+        'subsample': trial.suggest_float('subsample', 0.5, 0.8),
+        
+        # CONSTRAINT 4: RÉGULARISATION FORTE
+        # On augmente drastiquement les pénalités L1/L2
+        'reg_lambda': trial.suggest_float('reg_lambda', 2.0, 10.0), # L2 très fort
+        'reg_alpha': trial.suggest_float('reg_alpha', 1.0, 5.0),    # L1 fort
+        
+        # CONSTRAINT 5: BRANCHES ROBUSTES
+        # Il faut une réduction de perte significative pour créer une branche
+        'gamma': trial.suggest_float('gamma', 0.1, 1.0),
+        # Il faut beaucoup d'échantillons dans une feuille pour la valider
+        'min_child_weight': trial.suggest_int('min_child_weight', 3, 8),
+        
+        'colsample_bytree': trial.suggest_float('colsample_bytree', 0.3, 0.6),
+        'tree_method': 'hist',
+        'n_jobs': -1,
+        'random_state': 42,
+        'verbosity': 0
+    }
+
+    # Gestion du déséquilibre de classe
+    pos = np.sum(y_train == 1)
+    neg = np.sum(y_train == 0)
+    scale_pos_weight = neg / pos
+    params['scale_pos_weight'] = scale_pos_weight
+
+    # Cross-Validation 5-Fold Stratified
+    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    clf = xgb.XGBClassifier(**params)
+    
+    scores = cross_val_score(clf, X_trial, y_train, cv=cv, scoring='f1_macro', n_jobs=-1)
+    
+    return scores.mean()
+
+study = optuna.create_study(direction='maximize')
+study.optimize(objective, n_trials=N_TRIALS)
+
+print("-" * 50)
+print(f"Meilleur Macro F1 (Robust): {study.best_value:.4f}")
+print("Paramètres optimaux :")
+for key, value in study.best_params.items():
+    print(f"  {key}: {value}")
+print("-" * 50)
+
+# ======================================================================
+# 3. ENTRAÎNEMENT FINAL
+# ======================================================================
+
+print("Entraînement du modèle final...")
+
+best_params = study.best_params.copy()
+n_feat_final = best_params.pop('n_features')
+
+final_indices = sorted_pool_indices[:n_feat_final]
+X_train_final = X_train_genomic[:, final_indices]
+X_test_final = X_test_genomic[:, final_indices]
+
+scaler_final = StandardScaler()
+X_train_final = scaler_final.fit_transform(X_train_final)
+X_test_final = scaler_final.transform(X_test_final)
+
+pos = np.sum(y_train == 1)
+neg = np.sum(y_train == 0)
+best_params['scale_pos_weight'] = neg / pos
+
+model = xgb.XGBClassifier(**best_params)
+model.fit(X_train_final, y_train)
+
+print("Génération des prédictions...")
+y_pred = model.predict(X_test_final)
+
+submission = pd.DataFrame({
+    "id": ids_test,
+    "label": y_pred.astype(int)
+})
+
+filename = f"submission_robust_f1_{study.best_value:.4f}.csv"
+submission.to_csv(filename, index=False)
+print(f"Fichier de soumission prêt : {filename}")
+
+# Nettoyage
+data_train.close()
+data_test_npz.close()
+

@@ -1,0 +1,106 @@
+import numpy as np
+import pandas as pd
+import xgboost as xgb
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
+from tqdm import tqdm
+from xgboost.callback import TrainingCallback
+
+data = np.load("GREV/inf-8245-fall-2025/train.npz")
+X_train = data['X_train']
+y_train = data['y_train']
+ids_train = data['ids']
+
+std = X_train.std(axis=0)
+non_constant_cols = np.where(std > 0)[0]
+
+X_train = X_train[:, non_constant_cols]
+print(f" Colonnes conservées: {X_train.shape[1]}")
+
+scaler = StandardScaler()
+X_train = np.array(X_train)
+X_train = X_train.astype(np.float32)
+X_train_scaled = scaler.fit_transform(X_train)
+
+X_train_split, X_valid, y_train_split, y_valid = train_test_split(
+    X_train_scaled, y_train, test_size=0.15, random_state=42
+)
+
+tree_method = "gpu_hist"
+try:
+    _ = xgb.DeviceQuantileDMatrix(X_train_split, y_train_split)
+except:
+    tree_method = "hist"
+
+model = xgb.XGBClassifier(
+    n_estimators=3000,
+    learning_rate=0.01,
+    max_depth=8,
+    subsample=0.8,
+    colsample_bytree=0.8,
+    min_child_weight=1,
+    gamma=0,
+    reg_lambda=1.5,
+    reg_alpha=0.5,
+    tree_method=tree_method,
+    eval_metric="logloss",
+    random_state=42
+)
+
+class TQDMCallback(TrainingCallback):
+    def __init__(self, total):
+        self.pbar = tqdm(total=total, desc="Entraînement XGBoost")
+    def after_iteration(self, model, epoch, evals_log):
+        self.pbar.update(1)
+        return False
+    def after_training(self, model):
+        self.pbar.close()
+        return model
+
+print(" Entraînement")
+
+model.fit(
+    X_train_split, y_train_split,
+    eval_set=[(X_valid, y_valid)],
+    early_stopping_rounds=100,
+    verbose=False,
+    callbacks=[TQDMCallback(total=3000)]
+)
+print("Modèle entraîné")
+
+data_test = np.load("GREV/inf-8245-fall-2025/test.npz", allow_pickle=True)
+ids_test = data_test['ids']
+
+chunk_size = 10000
+n_rows = data_test['X_test'].shape[0]
+predictions = []
+
+print(f"Prédiction sur {n_rows} lignes par chunks de {chunk_size}...")
+
+for start in tqdm(range(0, n_rows, chunk_size)):
+    end = min(start + chunk_size, n_rows)
+   
+    # lecture chunk
+    X_chunk = data_test['X_test'][start:end, :]
+   
+    # suppression colonnes constantes
+    X_chunk = X_chunk[:, non_constant_cols]
+   
+    # standardisation
+    X_chunk_scaled = scaler.transform(X_chunk)
+   
+    # prédiction
+    y_chunk_pred = model.predict(X_chunk_scaled)
+   
+    predictions.append(y_chunk_pred)
+
+# concaténer toutes les prédictions
+y_pred = np.concatenate(predictions)
+
+submission = pd.DataFrame({
+    "id": ids_test,
+    "label": y_pred.astype(int)
+})
+
+submission.to_csv("submission.csv", index=False)
+print("submission.csv généré !")

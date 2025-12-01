@@ -1,0 +1,149 @@
+import numpy as np
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.impute import SimpleImputer
+from xgboost import XGBClassifier
+from sklearn.metrics import accuracy_score
+
+# -----------------------------
+# Chargement
+# -----------------------------
+train_npz = '/Users/gaspardjuillet/Library/Mobile Documents/com~apple~CloudDocs/Poly_Cours/Machine_Learning/Kaggle_competition/GREV/inf-8245-fall-2025/train.npz'
+test_npz  = '/Users/gaspardjuillet/Library/Mobile Documents/com~apple~CloudDocs/Poly_Cours/Machine_Learning/Kaggle_competition/GREV/inf-8245-fall-2025/test.npz'
+
+data = np.load(train_npz)
+X_spectral_full = data["X_train"].astype(np.float32)
+y_full = data["y_train"]
+
+data_test = np.load(test_npz)
+X_spectral_test = data_test["X_test"].astype(np.float32)
+ids_test = data_test["ids"]
+
+meta_train_full = pd.read_csv('/Users/gaspardjuillet/Library/Mobile Documents/com~apple~CloudDocs/Poly_Cours/Machine_Learning/Kaggle_competition/GREV/inf-8245-fall-2025/metadata_train.csv')
+meta_test       = pd.read_csv('/Users/gaspardjuillet/Library/Mobile Documents/com~apple~CloudDocs/Poly_Cours/Machine_Learning/Kaggle_competition/GREV/inf-8245-fall-2025/metadata_test.csv')
+
+cols_drop = ["Organism group", "ID", "Create date"]
+meta_train_full = meta_train_full.drop(columns=cols_drop, errors="ignore")
+meta_test       = meta_test.drop(columns=cols_drop, errors="ignore")
+
+num_cols = meta_train_full.select_dtypes(include=[np.number]).columns.tolist()
+cat_cols = meta_train_full.select_dtypes(exclude=[np.number]).columns.tolist()
+
+# -----------------------------
+# Réduction brute des features spectrales
+# -----------------------------
+MAX_FEATS = 100_000
+X_spectral_full = X_spectral_full[:, :MAX_FEATS]
+X_spectral_test = X_spectral_test[:, :MAX_FEATS]
+
+# -----------------------------
+# Train/Val split
+# -----------------------------
+X_spec_train, X_spec_val, meta_train, meta_val, y_train, y_val = train_test_split(
+    X_spectral_full, meta_train_full, y_full,
+    test_size=0.2, random_state=42, stratify=y_full
+)
+
+# -----------------------------
+# Préprocessing métadonnées
+# -----------------------------
+# Numériques
+imputer_num = SimpleImputer(strategy="median")
+scaler_num  = StandardScaler()
+
+meta_train_num = scaler_num.fit_transform(imputer_num.fit_transform(meta_train[num_cols]))
+meta_val_num   = scaler_num.transform(imputer_num.transform(meta_val[num_cols]))
+meta_test_num  = scaler_num.transform(imputer_num.transform(meta_test[num_cols]))
+
+# Catégorielles one-hot
+meta_train_cat = pd.get_dummies(meta_train[cat_cols], dummy_na=True)
+meta_val_cat   = pd.get_dummies(meta_val[cat_cols], dummy_na=True)
+meta_test_cat  = pd.get_dummies(meta_test[cat_cols], dummy_na=True)
+
+all_cols = meta_train_cat.columns.union(meta_val_cat.columns).union(meta_test_cat.columns)
+meta_train_cat = meta_train_cat.reindex(columns=all_cols, fill_value=0)
+meta_val_cat   = meta_val_cat.reindex(columns=all_cols, fill_value=0)
+meta_test_cat  = meta_test_cat.reindex(columns=all_cols, fill_value=0)
+
+meta_train_arr = np.hstack([meta_train_num, meta_train_cat.to_numpy()])
+meta_val_arr   = np.hstack([meta_val_num, meta_val_cat.to_numpy()])
+meta_test_arr  = np.hstack([meta_test_num, meta_test_cat.to_numpy()])
+
+# -----------------------------
+# Fusion spectres + métadonnées
+# -----------------------------
+X_train_full = np.hstack([X_spec_train, meta_train_arr])
+X_val_full   = np.hstack([X_spec_val, meta_val_arr])
+X_test_full  = np.hstack([X_spectral_test, meta_test_arr])
+
+# -----------------------------
+# Suppression des features corrélées par batch
+# -----------------------------
+def remove_correlated_features(X, threshold=0.95, batch_size=5000):
+    """
+    Supprime les colonnes fortement corrélées par blocs.
+    """
+    keep_cols = []
+    n_cols = X.shape[1]
+    for start in range(0, n_cols, batch_size):
+        end = min(start + batch_size, n_cols)
+        block = X[:, start:end].astype(np.float64)  # stable pour corrcoef
+        
+        if block.shape[1] == 1:
+            keep_cols.append(start)
+            continue
+        
+        corr_block = np.corrcoef(block, rowvar=False)
+        to_drop_block = set()
+        for i in range(corr_block.shape[0]):
+            if i in to_drop_block:
+                continue
+            for j in range(i+1, corr_block.shape[1]):
+                if corr_block[i, j] > threshold:
+                    to_drop_block.add(j)
+        keep_cols.extend([start + i for i in range(block.shape[1]) if i not in to_drop_block])
+    return keep_cols
+
+
+selected_cols = remove_correlated_features(X_train_full, threshold=0.95, batch_size=5000)
+
+X_train_reduced = X_train_full[:, selected_cols]
+X_val_reduced   = X_val_full[:, selected_cols]
+X_test_reduced  = X_test_full[:, selected_cols]
+
+# -----------------------------
+# Entraînement XGBoost simple
+# -----------------------------
+clf = XGBClassifier(
+    tree_method="hist",
+    eval_metric="logloss",
+    n_estimators=300,
+    max_depth=4,
+    learning_rate=0.05,
+    subsample=0.9,
+    colsample_bytree=0.8,
+    n_jobs=4
+)
+clf.fit(X_train_reduced, y_train)
+
+# -----------------------------
+# Évaluation validation
+# -----------------------------
+y_pred_val = clf.predict(X_val_reduced)
+val_acc = accuracy_score(y_val, y_pred_val)
+print("Validation accuracy:", val_acc)
+
+# -----------------------------
+# Submission
+# -----------------------------
+y_test_pred = clf.predict(X_test_reduced)
+df_sub = pd.DataFrame({"id": ids_test, "target": y_test_pred})
+df_sub.to_csv("submission.csv", index=False)
+
+
+
+
+
+
+
