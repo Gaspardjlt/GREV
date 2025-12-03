@@ -1,0 +1,435 @@
+# import numpy as np
+# import pandas as pd
+# import xgboost as xgb
+# from sklearn.preprocessing import StandardScaler
+# from sklearn.model_selection import StratifiedKFold
+# from sklearn.metrics import f1_score
+# import gc
+# import warnings
+
+# warnings.filterwarnings("ignore")
+
+# # ======================================================================
+# # CONFIGURATION
+# # ======================================================================
+# PATH_TRAIN_NPZ = "GREV/inf-8245-fall-2025/train.npz"
+# PATH_TEST_NPZ = "GREV/inf-8245-fall-2025/test.npz"
+# PATH_META_TRAIN = "GREV/inf-8245-fall-2025/metadata_train.csv"
+# PATH_META_TEST = "GREV/inf-8245-fall-2025/metadata_test.csv"
+
+# TARGET_FEATURES = 50000  
+# CHUNK_SIZE = 100000
+# N_FOLDS = 5
+
+# # Paramètres Robustes (Trial 48)
+# PARAMS = {
+#     'max_depth': 7,
+#     'learning_rate': 0.0146,
+#     'n_estimators': 1500,
+#     'subsample': 0.70,
+#     'colsample_bytree': 0.15,
+#     'reg_lambda': 1.56,
+#     'reg_alpha': 0.65,
+#     'gamma': 0.003,
+#     'min_child_weight': 2,
+#     'tree_method': 'hist',
+#     'n_jobs': -1,
+#     'random_state': 42,
+#     'verbosity': 0, 
+# }
+
+# # ======================================================================
+# # 1. PRÉPARATION DES MÉTADONNÉES
+# # ======================================================================
+
+# def prepare_metadata(path_meta, ids_align):
+#     print(f"Traitement métadonnées : {path_meta}")
+#     df = pd.read_csv(path_meta)
+    
+#     # Alignement strict avec les IDs du NPZ
+#     id_col = 'ID' if 'ID' in df.columns else 'id'
+#     df = df.set_index(id_col).reindex(ids_align).reset_index()
+    
+#     # Standardisation noms colonnes
+#     df.columns = [c.lower().replace(' ', '_') for c in df.columns]
+    
+#     # Suppression basée sur le PDF
+#     # [cite_start]"Organism group ne prend que la valeur escherichia_coli" [cite: 13, 206]
+#     # [cite_start]"On vire l'ID" [cite: 14, 205]
+#     cols_exclude = ['organism_group', 'id', 'unnamed:_0'] 
+#     df = df.drop(columns=[c for c in cols_exclude if c in df.columns], errors='ignore')
+    
+#     # Gestion Create Date -> Année (int)
+#     if 'create_date' in df.columns:
+#         df['create_date'] = pd.to_numeric(df['create_date'], errors='coerce')
+    
+#     # IMPUTATION SYSTÉMATIQUE (Mode)
+#     # [cite_start]Pour combler les 2% de manquants dans Location/Source [cite: 217, 220]
+#     for col in df.columns:
+#         if df[col].isna().sum() > 0:
+#             mode_values = df[col].mode()
+#             if len(mode_values) > 0:
+#                 fill_value = mode_values[0]
+#             else:
+#                 fill_value = 0 if pd.api.types.is_numeric_dtype(df[col]) else "unknown"
+#             df[col] = df[col].fillna(fill_value)
+
+#     # Conversion finale date
+#     if 'create_date' in df.columns:
+#         df['create_date'] = df['create_date'].astype(int)
+
+#     # One-Hot Encoding
+#     cat_cols = [c for c in df.columns if df[c].dtype == 'object']
+#     if len(cat_cols) > 0:
+#         df = pd.get_dummies(df, columns=cat_cols, drop_first=True, dtype=int)
+    
+#     return df
+
+# # ======================================================================
+# # 2. CHARGEMENT & PRÉPARATION DONNÉES
+# # ======================================================================
+
+# print("--- Chargement et Sélection (50k features) ---")
+# data_train = np.load(PATH_TRAIN_NPZ)
+# data_test_npz = np.load(PATH_TEST_NPZ)
+
+# X_train_raw = data_train['X_train']
+# y_train = data_train['y_train']
+# ids_train = data_train['ids']
+# X_test_raw = data_test_npz['X_test']
+# ids_test = data_test_npz['ids']
+
+# # Filtrage Variance
+# n_total = X_train_raw.shape[1]
+# variances = []
+# for i in range(0, n_total, CHUNK_SIZE):
+#     chunk = X_train_raw[:, i:min(i + CHUNK_SIZE, n_total)]
+#     variances.extend(np.var(chunk, axis=0))
+#     del chunk
+#     gc.collect()
+
+# top_indices = np.argsort(variances)[::-1][:TARGET_FEATURES]
+# top_indices.sort()
+
+# X_train_gen = X_train_raw[:, top_indices]
+# X_test_gen = X_test_raw[:, top_indices]
+
+# del X_train_raw, X_test_raw, variances
+# gc.collect()
+
+# print("--- Fusion Métadonnées ---")
+# # Préparation
+# df_meta_train = prepare_metadata(PATH_META_TRAIN, ids_train)
+# df_meta_test = prepare_metadata(PATH_META_TEST, ids_test)
+
+# # Alignement colonnes
+# all_cols = set(df_meta_train.columns) | set(df_meta_test.columns)
+# for col in all_cols:
+#     if col not in df_meta_train.columns: df_meta_train[col] = 0
+#     if col not in df_meta_test.columns: df_meta_test[col] = 0
+
+# # Tri colonnes
+# df_meta_train = df_meta_train.reindex(sorted(df_meta_train.columns), axis=1)
+# df_meta_test = df_meta_test.reindex(sorted(df_meta_test.columns), axis=1)
+
+# # Scaling Meta
+# scaler_meta = StandardScaler()
+# X_meta_train = scaler_meta.fit_transform(df_meta_train.values)
+# X_meta_test = scaler_meta.transform(df_meta_test.values)
+
+# # Scaling Genomique
+# print("Standardisation Génomique...")
+# scaler_gen = StandardScaler()
+# X_train_gen = scaler_gen.fit_transform(X_train_gen)
+# X_test_gen = scaler_gen.transform(X_test_gen)
+
+# # Fusion Finale
+# X_train_full = np.hstack((X_train_gen, X_meta_train))
+# X_test_full = np.hstack((X_test_gen, X_meta_test))
+
+# print(f"Dataset prêt : {X_train_full.shape}")
+
+# # ======================================================================
+# # 3. 5-FOLD CROSS VALIDATION
+# # ======================================================================
+
+# print(f"\n--- Démarrage de la Cross-Validation ({N_FOLDS} Folds) ---")
+
+# skf = StratifiedKFold(n_splits=N_FOLDS, shuffle=True, random_state=42)
+# cv_scores = []
+
+# # Pour sauver le meilleur score localement si besoin
+# oof_preds = np.zeros(X_train_full.shape[0])
+
+# for fold, (train_idx, val_idx) in enumerate(skf.split(X_train_full, y_train)):
+#     X_tr, X_val = X_train_full[train_idx], X_train_full[val_idx]
+#     y_tr, y_val = y_train[train_idx], y_train[val_idx]
+    
+#     # Calcul scale_pos_weight pour ce fold
+#     pos = np.sum(y_tr == 1)
+#     neg = np.sum(y_tr == 0)
+#     PARAMS['scale_pos_weight'] = neg / pos
+    
+#     model = xgb.XGBClassifier(**PARAMS)
+#     model.fit(
+#         X_tr, y_tr,
+#         eval_set=[(X_val, y_val)],
+#         verbose=False  # On désactive le verbose pour ne pas polluer l'affichage
+#     )
+    
+#     preds = model.predict(X_val)
+#     score = f1_score(y_val, preds, average='macro')
+#     cv_scores.append(score)
+    
+#     print(f"Fold {fold+1}/{N_FOLDS} - Macro F1: {score:.5f}")
+
+# mean_score = np.mean(cv_scores)
+# std_score = np.std(cv_scores)
+
+# print("-" * 40)
+# print(f"RÉSULTAT CV MOYEN : {mean_score:.5f} (+/- {std_score:.5f})")
+# print("-" * 40)
+
+# # ======================================================================
+# # 4. ENTRAÎNEMENT FINAL (FULL DATA)
+# # ======================================================================
+
+# print("\n--- Entraînement Final sur TOUT le dataset ---")
+
+# # Poids global
+# pos_full = np.sum(y_train == 1)
+# neg_full = np.sum(y_train == 0)
+# PARAMS['scale_pos_weight'] = neg_full / pos_full
+
+# model_full = xgb.XGBClassifier(**PARAMS)
+# model_full.fit(X_train_full, y_train, verbose=False)
+
+# print("Génération de la soumission...")
+# y_test_pred = model_full.predict(X_test_full)
+
+# submission = pd.DataFrame({
+#     "id": ids_test,
+#     "label": y_test_pred.astype(int)
+# })
+
+# filename = f"submission_50k_meta_CV_{mean_score:.4f}.csv"
+# submission.to_csv(filename, index=False)
+# print(f"Fichier sauvegardé : {filename}")
+
+# data_train.close()
+# data_test_npz.close()
+
+import numpy as np
+import pandas as pd
+import xgboost as xgb
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import StratifiedKFold
+from sklearn.metrics import f1_score
+import gc
+import warnings
+
+warnings.filterwarnings("ignore")
+
+# ======================================================================
+# CONFIGURATION
+# ======================================================================
+PATH_TRAIN_NPZ = "GREV/inf-8245-fall-2025/train.npz"
+PATH_TEST_NPZ = "GREV/inf-8245-fall-2025/test.npz"
+PATH_META_TRAIN = "GREV/inf-8245-fall-2025/metadata_train.csv"
+PATH_META_TEST = "GREV/inf-8245-fall-2025/metadata_test.csv"
+
+# STRATÉGIE : Les 50 000 premières colonnes (indices 0 à 50000)
+TARGET_INDICES = 50000  
+N_FOLDS = 5
+
+# Paramètres Robustes (Trial 48)
+PARAMS = {
+    'max_depth': 7,
+    'learning_rate': 0.0146,
+    'n_estimators': 1500,
+    'subsample': 0.70,
+    'colsample_bytree': 0.15,
+    'reg_lambda': 1.56,
+    'reg_alpha': 0.65,
+    'gamma': 0.003,
+    'min_child_weight': 2,
+    'tree_method': 'hist',
+    'n_jobs': -1,
+    'random_state': 42,
+    'verbosity': 0, 
+}
+
+# ======================================================================
+# 1. PRÉPARATION DES MÉTADONNÉES (VERSION ROBUSTE)
+# ======================================================================
+
+def prepare_metadata(path_meta, ids_align):
+    print(f"Traitement métadonnées : {path_meta}")
+    df = pd.read_csv(path_meta)
+    
+    # Alignement strict avec les IDs du NPZ
+    id_col = 'ID' if 'ID' in df.columns else 'id'
+    df = df.set_index(id_col).reindex(ids_align).reset_index()
+    
+    # Standardisation noms colonnes
+    df.columns = [c.lower().replace(' ', '_') for c in df.columns]
+    
+    # Suppression basée sur le PDF
+    # [cite_start]"Organism group ne prend que la valeur escherichia_coli" [cite: 13, 206]
+    # [cite_start]"On vire l'ID" [cite: 14, 205]
+    cols_exclude = ['organism_group', 'id', 'unnamed:_0'] 
+    df = df.drop(columns=[c for c in cols_exclude if c in df.columns], errors='ignore')
+    
+    # Gestion Create Date -> Année (int)
+    if 'create_date' in df.columns:
+        df['create_date'] = pd.to_numeric(df['create_date'], errors='coerce')
+    
+    # IMPUTATION SYSTÉMATIQUE (Mode)
+    # [cite_start]Pour gérer les NaN signalés dans le PDF [cite: 210-220]
+    for col in df.columns:
+        if df[col].isna().sum() > 0:
+            mode_values = df[col].mode()
+            if len(mode_values) > 0:
+                fill_value = mode_values[0]
+            else:
+                fill_value = 0 if pd.api.types.is_numeric_dtype(df[col]) else "unknown"
+            df[col] = df[col].fillna(fill_value)
+
+    # Conversion finale date
+    if 'create_date' in df.columns:
+        df['create_date'] = df['create_date'].astype(int)
+
+    # One-Hot Encoding
+    # [cite_start]On garde Location, Isolation source, etc. [cite: 207]
+    cat_cols = [c for c in df.columns if df[c].dtype == 'object']
+    if len(cat_cols) > 0:
+        df = pd.get_dummies(df, columns=cat_cols, drop_first=True, dtype=int)
+    
+    return df
+
+# ======================================================================
+# 2. CHARGEMENT & SÉLECTION DIRECTE (SLICING)
+# ======================================================================
+
+print("--- Chargement et Slicing (Premières 50k features) ---")
+data_train = np.load(PATH_TRAIN_NPZ)
+data_test_npz = np.load(PATH_TEST_NPZ)
+
+X_train_raw = data_train['X_train']
+y_train = data_train['y_train']
+ids_train = data_train['ids']
+X_test_raw = data_test_npz['X_test']
+ids_test = data_test_npz['ids']
+
+# SÉLECTION DIRECTE : On prend les colonnes 0 à 49999
+print(f"Sélection des colonnes 0 à {TARGET_INDICES}...")
+X_train_gen = X_train_raw[:, :TARGET_INDICES]
+X_test_gen = X_test_raw[:, :TARGET_INDICES]
+
+# Nettoyage immédiat pour la RAM
+del X_train_raw, X_test_raw
+gc.collect()
+
+print("--- Fusion Métadonnées ---")
+# Préparation
+df_meta_train = prepare_metadata(PATH_META_TRAIN, ids_train)
+df_meta_test = prepare_metadata(PATH_META_TEST, ids_test)
+
+# Alignement colonnes (Train/Test doivent avoir les mêmes colonnes One-Hot)
+all_cols = set(df_meta_train.columns) | set(df_meta_test.columns)
+for col in all_cols:
+    if col not in df_meta_train.columns: df_meta_train[col] = 0
+    if col not in df_meta_test.columns: df_meta_test[col] = 0
+
+# Tri colonnes
+df_meta_train = df_meta_train.reindex(sorted(df_meta_train.columns), axis=1)
+df_meta_test = df_meta_test.reindex(sorted(df_meta_test.columns), axis=1)
+
+# Scaling Meta
+scaler_meta = StandardScaler()
+X_meta_train = scaler_meta.fit_transform(df_meta_train.values)
+X_meta_test = scaler_meta.transform(df_meta_test.values)
+
+# Scaling Genomique
+print("Standardisation Génomique...")
+scaler_gen = StandardScaler()
+X_train_gen = scaler_gen.fit_transform(X_train_gen)
+X_test_gen = scaler_gen.transform(X_test_gen)
+
+# Fusion Finale
+X_train_full = np.hstack((X_train_gen, X_meta_train))
+X_test_full = np.hstack((X_test_gen, X_meta_test))
+
+print(f"Dataset prêt : {X_train_full.shape}")
+
+# Nettoyage intermédiaire
+del X_train_gen, X_test_gen, X_meta_train, X_meta_test, df_meta_train, df_meta_test
+gc.collect()
+
+# ======================================================================
+# 3. 5-FOLD CROSS VALIDATION
+# ======================================================================
+
+print(f"\n--- Démarrage de la Cross-Validation ({N_FOLDS} Folds) ---")
+
+skf = StratifiedKFold(n_splits=N_FOLDS, shuffle=True, random_state=42)
+cv_scores = []
+
+for fold, (train_idx, val_idx) in enumerate(skf.split(X_train_full, y_train)):
+    X_tr, X_val = X_train_full[train_idx], X_train_full[val_idx]
+    y_tr, y_val = y_train[train_idx], y_train[val_idx]
+    
+    # Calcul scale_pos_weight pour ce fold
+    pos = np.sum(y_tr == 1)
+    neg = np.sum(y_tr == 0)
+    PARAMS['scale_pos_weight'] = neg / pos
+    
+    model = xgb.XGBClassifier(**PARAMS)
+    model.fit(
+        X_tr, y_tr,
+        eval_set=[(X_val, y_val)],
+        verbose=False 
+    )
+    
+    preds = model.predict(X_val)
+    score = f1_score(y_val, preds, average='macro')
+    cv_scores.append(score)
+    
+    print(f"Fold {fold+1}/{N_FOLDS} - Macro F1: {score:.5f}")
+
+mean_score = np.mean(cv_scores)
+std_score = np.std(cv_scores)
+
+print("-" * 40)
+print(f"RÉSULTAT CV MOYEN : {mean_score:.5f} (+/- {std_score:.5f})")
+print("-" * 40)
+
+# ======================================================================
+# 4. ENTRAÎNEMENT FINAL (FULL DATA)
+# ======================================================================
+
+print("\n--- Entraînement Final sur TOUT le dataset ---")
+
+# Poids global
+pos_full = np.sum(y_train == 1)
+neg_full = np.sum(y_train == 0)
+PARAMS['scale_pos_weight'] = neg_full / pos_full
+
+model_full = xgb.XGBClassifier(**PARAMS)
+model_full.fit(X_train_full, y_train, verbose=False)
+
+print("Génération de la soumission...")
+y_test_pred = model_full.predict(X_test_full)
+
+submission = pd.DataFrame({
+    "id": ids_test,
+    "label": y_test_pred.astype(int)
+})
+
+filename = f"submission_first50k_meta_CV_{mean_score:.4f}.csv"
+submission.to_csv(filename, index=False)
+print(f"Fichier sauvegardé : {filename}")
+
+data_train.close()
+data_test_npz.close()
+
